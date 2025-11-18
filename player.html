@@ -303,6 +303,8 @@
         const MAX_JOYSTICK_DISTANCE = 30; 
         let moveTouchId = -1; 
         let moveJoystickCenter = { x: 0, y: 0 };
+        // Armazena a posição X anterior de toques para cálculo de delta da câmera
+        const touchXHistory = {}; 
         
         const vector = new THREE.Vector3(); 
         const loader = new THREE.TextureLoader();
@@ -325,39 +327,47 @@
         };
         
         // -----------------------------------------------------------------------
-        // FUNÇÃO DE DETECÇÃO DE APLICATIVO (E LAYOUT)
+        // FUNÇÃO DE DETECÇÃO DE LAYOUT E ADIÇÃO DE LISTENERS
         // -----------------------------------------------------------------------
 
         function detectDeviceAndSetLayout() {
-            // Verifica se é uma tela pequena para ajustar a câmera e o layout CSS (Media Query)
             isMobileLayout = window.innerWidth <= 600 || window.innerHeight <= 600;
+            const canvas = document.getElementById('gameCanvas');
 
             if (isMobileLayout) {
                 currentCameraOffset = CAMERA_OFFSET_MOBILE;
                 document.getElementById('virtualControls').style.display = 'block';
-                // Adiciona o listener de toque ao canvas principal (para a rotação da câmera)
-                document.getElementById('gameCanvas').addEventListener('touchstart', handleTouchStart, false);
-                document.getElementById('gameCanvas').addEventListener('touchmove', handleTouchMove, false);
-                document.getElementById('gameCanvas').addEventListener('touchend', handleTouchEnd, false);
+                
+                // Adiciona listeners ao CANVAS (para capturar toques que não são do joystick)
+                canvas.addEventListener('touchstart', handleTouchStart, false);
+                canvas.addEventListener('touchmove', handleTouchMove, false);
+                canvas.addEventListener('touchend', handleTouchEnd, false);
+
+                // Garante que o joystick center é calculado
+                calculateJoystickCenter();
 
             } else {
                 currentCameraOffset = CAMERA_OFFSET_DESKTOP;
                 document.getElementById('virtualControls').style.display = 'none';
-                // Remove os listeners de toque no desktop para evitar conflitos
-                document.getElementById('gameCanvas').removeEventListener('touchstart', handleTouchStart, false);
-                document.getElementById('gameCanvas').removeEventListener('touchmove', handleTouchMove, false);
-                document.getElementById('gameCanvas').removeEventListener('touchend', handleTouchEnd, false);
+                
+                // Remove listeners de toque no desktop
+                canvas.removeEventListener('touchstart', handleTouchStart, false);
+                canvas.removeEventListener('touchmove', handleTouchMove, false);
+                canvas.removeEventListener('touchend', handleTouchEnd, false);
             }
             
             return false; 
         }
         
         // -----------------------------------------------------------------------
-        // LÓGICA DO JOYSTICK E TOUCH DA CÂMERA (COMPLETA)
+        // LÓGICA DO JOYSTICK E TOUCH DA CÂMERA (CORRIGIDA)
         // -----------------------------------------------------------------------
         
         function calculateJoystickCenter() {
              const base = document.getElementById('moveJoystickBase');
+             if (!base) return;
+             
+             // O centro precisa ser calculado a partir da posição da base na tela
              const rect = base.getBoundingClientRect();
              moveJoystickCenter = {
                 x: rect.left + rect.width / 2,
@@ -376,16 +386,21 @@
                 const touch = event.changedTouches[i];
                 const touchX = touch.clientX;
                 const canvasWidth = window.innerWidth;
+                const baseRect = document.getElementById('moveJoystickBase').getBoundingClientRect();
                 
-                if (touchX < canvasWidth / 2 && moveTouchId === -1) {
-                    const baseRect = document.getElementById('moveJoystickBase').getBoundingClientRect();
-                    
-                    if (touch.clientX >= baseRect.left && touch.clientX <= baseRect.right &&
-                        touch.clientY >= baseRect.top && touch.clientY <= baseRect.bottom) {
-                        moveTouchId = touch.identifier;
-                        document.getElementById('moveJoystickHandle').style.transform = `translate(0px, 0px)`;
-                    }
+                // 1. Inicia o Joystick de Movimento (Metade Esquerda, DENTRO da Base)
+                if (moveTouchId === -1 && 
+                    touch.clientX >= baseRect.left && touch.clientX <= baseRect.right &&
+                    touch.clientY >= baseRect.top && touch.clientY <= baseRect.bottom) 
+                {
+                    moveTouchId = touch.identifier;
+                    document.getElementById('moveJoystickHandle').style.transform = `translate(0px, 0px)`;
                 } 
+                
+                // 2. Inicia o Histórico para Rotação da Câmera (Qualquer lugar, exceto o Joystick)
+                if (touch.identifier !== moveTouchId && touchX > canvasWidth / 2) {
+                     touchXHistory[touch.identifier] = touchX;
+                }
             }
         }
 
@@ -393,12 +408,13 @@
             if (!player || !isMobileLayout) return;
             event.preventDefault(); 
             
+            const canvasWidth = window.innerWidth;
+
             for (let i = 0; i < event.changedTouches.length; i++) {
                 const touch = event.changedTouches[i];
                 const touchX = touch.clientX;
-                const canvasWidth = window.innerWidth;
 
-                // --- 1. Joystick de Movimento (Metade Esquerda) ---
+                // --- 1. Joystick de Movimento ---
                 if (touch.identifier === moveTouchId) {
                     const dx = touch.clientX - moveJoystickCenter.x;
                     const dy = touch.clientY - moveJoystickCenter.y;
@@ -416,18 +432,25 @@
                     keys['W'] = normalizedY < -0.1; 
                     keys['S'] = normalizedY > 0.1; 
 
+                    // CRÍTICO: Aplica rotação direta ao player se houver movimento horizontal no stick
                     if (Math.abs(normalizedX) > 0.1) {
                          player.rotation.y -= normalizedX * ROTATE_SPEED * 15; 
+                    } else {
+                         keys['A'] = keys['D'] = false; // Garante que as teclas A/D do stick estão desligadas se o stick estiver centralizado
                     }
                 } 
                 
                 // --- 2. Rotação da Câmera (Metade Direita) ---
-                else if (touchX > canvasWidth / 2) {
-                    if (touch.prevScreenX) {
-                        const deltaX = touch.screenX - touch.prevScreenX;
-                        player.rotation.y -= deltaX * ROTATE_SPEED * 0.5; 
+                else if (touchXHistory[touch.identifier] !== undefined) {
+                    const prevX = touchXHistory[touch.identifier];
+                    const deltaX = touchX - prevX;
+                    
+                    if (Math.abs(deltaX) > 1) { // Verifica se houve movimento real
+                         player.rotation.y -= deltaX * ROTATE_SPEED * 0.5; // Ajuste de sensibilidade
                     }
-                    touch.prevScreenX = touch.screenX;
+                    
+                    // Atualiza o histórico para o próximo frame
+                    touchXHistory[touch.identifier] = touchX;
                 }
             }
         }
@@ -439,10 +462,14 @@
                 const touch = event.changedTouches[i];
 
                 if (touch.identifier === moveTouchId) {
+                    // Reset do Joystick
                     moveTouchId = -1;
                     document.getElementById('moveJoystickHandle').style.transform = `translate(0px, 0px)`;
                     keys['W'] = keys['S'] = keys['A'] = keys['D'] = false;
                 }
+                
+                // Limpa o histórico de toques da câmera
+                delete touchXHistory[touch.identifier];
             }
         }
         
@@ -698,7 +725,6 @@
                     });
             });
         }
-        // --------------------------------------------------------
 
         function initPlayer(gameData) {
             const canvas = document.getElementById('gameCanvas');
